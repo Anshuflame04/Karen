@@ -132,3 +132,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         print("Client disconnected")
+
+# Add a basic route for testing the API
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to the Anshu Gemini API"}
