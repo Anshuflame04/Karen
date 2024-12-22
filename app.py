@@ -1,15 +1,12 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 import numpy as np
+import asyncio
 import cv2
 import base64
 import json
 from ultralytics import YOLO
 import google.generativeai as genai
-from gtts import gTTS
-import io
-import asyncio
-from fastapi.responses import StreamingResponse
 
 # Configure Gemini API
 api_key = "AIzaSyBSCp3SG9pBiAFvo9e5zVupU4D4Nhoyd-o"
@@ -64,23 +61,7 @@ def process_frame(frame):
 
     return frame, detected_objects
 
-def text_to_speech(text):
-    tts = gTTS(text=text, lang='en')
-    # Use write_to_fp to write the audio to the BytesIO object
-    audio_io = io.BytesIO()
-    tts.write_to_fp(audio_io)
-    audio_io.seek(0)  # Rewind the file pointer to the start
-    return audio_io
-
 app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Update this with your React app's origin
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -88,10 +69,16 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            image_data = data  # Get the image data (base64 string)
+            payload = json.loads(data)  # Expecting JSON with "image" and "prompt"
+            image_data = payload.get("image")
+            user_prompt = payload.get("prompt", "")
+
+            if not image_data:
+                await websocket.send_text(json.dumps({"error": "No image provided"}))
+                continue
 
             # Convert the base64 string to an image
-            image_data = data.split(",")[1]  # If the image data has a prefix, like "data:image/png;base64,"
+            image_data = image_data.split(",")[1]  # Remove the data URL prefix
             img_data = base64.b64decode(image_data)
             np_array = np.frombuffer(img_data, dtype=np.uint8)
             frame = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
@@ -99,36 +86,24 @@ async def websocket_endpoint(websocket: WebSocket):
             # Process the frame using YOLO model
             frame, detected_objects = process_frame(frame)
 
-            # Generate content using Gemini based on detected objects
-            if detected_objects:
-                # Create a natural language description with a pre-prompt
-                pre_prompt = "You are an AI assistant for a blind person. Describe the surroundings based on detected objects in a helpful and concise manner with a assumed distance and direction of objects."
-                object_description = ". ".join(detected_objects)
-                prompt = f"{pre_prompt} The detected objects are: {object_description}. Please describe them."
-                print("\nPrompt to Gemini API:", prompt)
+            # Combine prompts
+            pre_prompt = "You are an AI assistant for a blind person. Describe the surroundings based on detected objects in a helpful and concise manner with an assumed distance and direction of objects."
+            object_description = ". ".join(detected_objects)
+            full_prompt = f"{pre_prompt} The detected objects are: {object_description}. User's additional context: {user_prompt}."
 
-                # Get the response from Gemini
-                content = generate_content(prompt)
-                print("\nGemini's Response:\n", content)
+            print("\nPrompt to Gemini API:", full_prompt)
 
-                # Convert the response to speech
-                audio_io = text_to_speech(content)
+            # Get the response from Gemini
+            content = generate_content(full_prompt)
+            print("\nGemini's Response:\n", content)
 
-                # Send the response as a JSON message
-                response = {
-                    "objects": detected_objects,
-                    "geminiResponse": content
-                }
+            response = {
+                "objects": detected_objects,
+                "geminiResponse": content
+            }
 
-                # Send the response and the audio back to the client
-                await websocket.send_text(json.dumps(response))
-
-                # Sending audio as a streaming response in WebSocket
-                await websocket.send_bytes(audio_io.read())
-
-            else:
-                response = {"objects": [], "geminiResponse": "No objects detected."}
-                await websocket.send_text(json.dumps(response))
+            # Send the response back to the client
+            await websocket.send_text(json.dumps(response))
 
     except WebSocketDisconnect:
         print("Client disconnected")
